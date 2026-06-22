@@ -278,6 +278,51 @@ def build_turn_context(
 
     active_system_prompt = agent._cached_system_prompt
 
+    # ── Plugin system_prompt hook (every turn, hash-based diffing) ──
+    # Fires on every turn. Plugins contribute content to the system prompt.
+    # Only rebuilds the system prompt when content actually changes (hash diff).
+    if active_system_prompt:
+        try:
+            from hermes_cli.plugins import get_plugin_manager as _get_pm
+            pm = _get_pm()
+            if pm and pm.has_hook("system_prompt"):
+                import hashlib
+                if not hasattr(agent, "_plugin_system_prompt_hashes"):
+                    agent._plugin_system_prompt_hashes = {}
+                hook_results = pm.invoke_hook(
+                    "system_prompt",
+                    agent=agent,
+                    session_id=agent.session_id or "",
+                    sender_id=agent.sender_id,
+                    platform=getattr(agent, "platform", None) or "",
+                    conversation_history=conversation_history,
+                )
+                for result in hook_results:
+                    if not isinstance(result, dict) or "content" not in result:
+                        continue
+                    content = result["content"]
+                    if not content:
+                        continue
+                    content_hash = result.get("hash") or hashlib.sha256(
+                        content.encode()
+                    ).hexdigest()
+                    # Compare to previously injected hash for this content.
+                    # If unchanged, skip (preserves prefix cache).
+                    # If changed, append new content and update hash.
+                    prev_hash = agent._plugin_system_prompt_hashes.get(
+                        "system_prompt"
+                    )
+                    if prev_hash != content_hash:
+                        active_system_prompt = (
+                            active_system_prompt + "\n\n" + content
+                        )
+                        agent._plugin_system_prompt_hashes[
+                            "system_prompt"
+                        ] = content_hash
+                        agent._cached_system_prompt = active_system_prompt
+        except Exception as exc:
+            logger.warning("system_prompt hook invocation failed: %s", exc)
+
     # Crash-resilience: persist the inbound user turn as soon as the session row exists.
     try:
         agent._persist_session(messages, conversation_history)

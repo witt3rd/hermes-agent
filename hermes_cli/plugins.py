@@ -192,6 +192,18 @@ VALID_HOOKS: Set[str] = {
     "kanban_task_claimed",
     "kanban_task_completed",
     "kanban_task_blocked",
+    # System prompt hook. Fired on every turn AFTER the base system prompt is
+    # built/restored. Plugins return {"content": <str>, "hash": <optional str>}
+    # to contribute content to the system prompt. The framework automatically
+    # detects content changes via hash comparison — only rebuilds the system
+    # prompt when the hash differs from the previous injection. This means:
+    #   - If plugin content hasn't changed, the hash is the same, and the cached
+    #     system prompt is reused (zero token cost, prefix cache preserved).
+    #   - If plugin content changes, the hash differs on the next turn, and the
+    #     system prompt is rebuilt with the new content.
+    # No manual invalidation API is needed — changes are detected automatically.
+    # Kwargs: agent, session_id, sender_id, platform, conversation_history.
+    "system_prompt",
 }
 
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"
@@ -1721,6 +1733,21 @@ class PluginManager:
         system prompt stays identical across turns so cached tokens
         are reused.  All injected context is ephemeral — never
         persisted to session DB.
+
+        For ``system_prompt``, callbacks may return a dict describing
+        content to inject into the system prompt::
+
+            {"content": "substrate text...", "hash": "sha256..."}
+
+        The ``hash`` field is optional; if omitted, the framework computes
+        a SHA-256 hash of the content. The framework compares the hash to
+        the previously injected hash for this hook callback. If the hash
+        is unchanged, the system prompt is NOT rebuilt (preserving the
+        prefix cache). If the hash differs, the system prompt is rebuilt
+        with the new content and the new hash is stored.
+
+        This means plugins don't need to manually signal invalidation —
+        content changes are detected automatically on every turn.
         """
         kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
         callbacks = self._hooks.get(hook_name, [])
