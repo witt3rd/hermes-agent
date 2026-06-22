@@ -394,6 +394,12 @@ def build_turn_context(
                     active_system_prompt = agent._base_system_prompt + "\n\n" + combined
                     agent._plugin_system_prompt_hashes["system_prompt"] = content_hash
                     agent._cached_system_prompt = active_system_prompt
+            else:
+                # All plugins returned empty/None — clear injected content
+                if agent._plugin_system_prompt_hashes.get("system_prompt"):
+                    active_system_prompt = agent._base_system_prompt or ""
+                    agent._plugin_system_prompt_hashes.pop("system_prompt", None)
+                    agent._cached_system_prompt = active_system_prompt
     except Exception as exc:
         logger.warning("system_prompt hook failed: %s", exc)
 
