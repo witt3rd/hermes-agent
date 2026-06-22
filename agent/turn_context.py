@@ -278,47 +278,6 @@ def build_turn_context(
 
     active_system_prompt = agent._cached_system_prompt
 
-    # ── Plugin system_prompt hook (every turn, hash-based diffing) ──
-    # Fires on every turn. Plugins contribute content to the system prompt.
-    # Only rebuilds the system prompt when content actually changes (hash diff).
-    if active_system_prompt:
-        try:
-            from hermes_cli.plugins import get_plugin_manager as _get_pm
-            pm = _get_pm()
-            if pm and pm.has_hook("system_prompt"):
-                import hashlib
-                if not hasattr(agent, "_plugin_system_prompt_hashes"):
-                    agent._plugin_system_prompt_hashes = {}
-                hook_results = pm.invoke_hook(
-                    "system_prompt",
-                    agent=agent,
-                    session_id=agent.session_id or "",
-                    sender_id=agent.sender_id,
-                    platform=getattr(agent, "platform", None) or "",
-                    conversation_history=conversation_history,
-                )
-                for result in hook_results:
-                    if not isinstance(result, dict) or "content" not in result:
-                        continue
-                    content = result["content"]
-                    if not content:
-                        continue
-                    # Framework computes the hash — plugins just return content
-                    content_hash = hashlib.sha256(content.encode()).hexdigest()
-                    prev_hash = agent._plugin_system_prompt_hashes.get(
-                        "system_prompt"
-                    )
-                    if prev_hash != content_hash:
-                        active_system_prompt = (
-                            active_system_prompt + "\n\n" + content
-                        )
-                        agent._plugin_system_prompt_hashes[
-                            "system_prompt"
-                        ] = content_hash
-                        agent._cached_system_prompt = active_system_prompt
-        except Exception as exc:
-            logger.warning("system_prompt hook invocation failed: %s", exc)
-
     # Crash-resilience: persist the inbound user turn as soon as the session row exists.
     try:
         agent._persist_session(messages, conversation_history)
@@ -350,7 +309,6 @@ def build_turn_context(
 
         if not _preflight_deferred:
             _last = _compressor.last_prompt_tokens
-            # Do NOT overwrite the -1 sentinel (#36718).
             if _last >= 0 and _preflight_tokens > _last:
                 _compressor.last_prompt_tokens = _preflight_tokens
 
@@ -382,10 +340,6 @@ def build_turn_context(
                     messages, system_message, approx_tokens=_preflight_tokens,
                     task_id=effective_task_id,
                 )
-                # Re-estimate now so size-only compression (same row count,
-                # lower token count — e.g. summarising tool outputs) is
-                # recognised as progress instead of being misread as
-                # "Cannot compress further". Fixes #39548.
                 _preflight_tokens = estimate_request_tokens_rough(
                     messages,
                     system_prompt=active_system_prompt or "",
@@ -394,7 +348,7 @@ def build_turn_context(
                 if not _compression_made_progress(
                     _orig_len, len(messages), _orig_tokens, _preflight_tokens
                 ):
-                    break  # Cannot compress further: neither rows nor tokens moved
+                    break
                 conversation_history = None
                 agent._empty_content_retries = 0
                 agent._thinking_prefill_retries = 0
@@ -403,6 +357,51 @@ def build_turn_context(
                 agent._mute_post_response = False
                 if not _compressor.should_compress(_preflight_tokens):
                     break
+
+    # ── Plugin system_prompt hook (after compression, into system prompt) ──
+    # Fires every turn. Plugins return {"content": <str>} to inject into system prompt.
+    # Framework computes SHA-256 hash of combined plugin content and only rebuilds
+    # the system prompt when content changes. Stores base prompt (without plugin
+    # content) so updates replace rather than accumulate.
+    try:
+        from hermes_cli.plugins import get_plugin_manager as _get_pm
+        pm = _get_pm()
+        if pm and pm.has_hook("system_prompt"):
+            import hashlib
+            if not hasattr(agent, "_plugin_system_prompt_hashes"):
+                agent._plugin_system_prompt_hashes = {}
+            # Collect all plugin contents first, then hash combined
+            plugin_contents: list[str] = []
+            hook_results = pm.invoke_hook(
+                "system_prompt",
+                agent=agent,
+                session_id=agent.session_id or "",
+                sender_id=getattr(agent, "_user_id", None) or "",
+                platform=getattr(agent, "platform", None) or "",
+                conversation_history=list(messages),
+            )
+            for result in hook_results:
+                if isinstance(result, dict) and result.get("content"):
+                    plugin_contents.append(result["content"])
+            if plugin_contents:
+                combined = "\n\n".join(plugin_contents)
+                content_hash = hashlib.sha256(combined.encode()).hexdigest()
+                prev_hash = agent._plugin_system_prompt_hashes.get("system_prompt")
+                if prev_hash != content_hash:
+                    # Content changed — rebuild from base prompt
+                    if not hasattr(agent, "_base_system_prompt"):
+                        agent._base_system_prompt = agent._cached_system_prompt or ""
+                    active_system_prompt = agent._base_system_prompt + "\n\n" + combined
+                    agent._plugin_system_prompt_hashes["system_prompt"] = content_hash
+                    agent._cached_system_prompt = active_system_prompt
+            else:
+                # All plugins returned empty/None — clear injected content
+                if agent._plugin_system_prompt_hashes.get("system_prompt"):
+                    active_system_prompt = agent._base_system_prompt or ""
+                    agent._plugin_system_prompt_hashes.pop("system_prompt", None)
+                    agent._cached_system_prompt = active_system_prompt
+    except Exception as exc:
+        logger.warning("system_prompt hook failed: %s", exc)
 
     # Plugin hook: pre_llm_call (context injected into user message, not system prompt).
     plugin_user_context = ""
