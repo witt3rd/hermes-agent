@@ -1734,20 +1734,19 @@ class PluginManager:
         are reused.  All injected context is ephemeral — never
         persisted to session DB.
 
-        For ``system_prompt``, callbacks may return a dict describing
-        content to inject into the system prompt::
+        For ``system_prompt``, callbacks return a dict with content to inject
+        into the system prompt::
 
-            {"content": "substrate text...", "hash": "sha256..."}
+            {"content": "substrate text..."}
 
-        The ``hash`` field is optional; if omitted, the framework computes
-        a SHA-256 hash of the content. The framework compares the hash to
-        the previously injected hash for this hook callback. If the hash
-        is unchanged, the system prompt is NOT rebuilt (preserving the
-        prefix cache). If the hash differs, the system prompt is rebuilt
-        with the new content and the new hash is stored.
+        The framework computes a SHA-256 hash of the content and compares it
+        to the hash from the previous injection. If the hash is unchanged,
+        the system prompt is NOT rebuilt (preserving the prefix cache). If the
+        hash differs, the system prompt is rebuilt with the new content.
 
-        This means plugins don't need to manually signal invalidation —
-        content changes are detected automatically on every turn.
+        This means plugins don't need to manually signal invalidation or
+        compute hashes — content changes are detected automatically on every
+        turn.
         """
         kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
         callbacks = self._hooks.get(hook_name, [])

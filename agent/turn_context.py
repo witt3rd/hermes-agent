@@ -303,12 +303,8 @@ def build_turn_context(
                     content = result["content"]
                     if not content:
                         continue
-                    content_hash = result.get("hash") or hashlib.sha256(
-                        content.encode()
-                    ).hexdigest()
-                    # Compare to previously injected hash for this content.
-                    # If unchanged, skip (preserves prefix cache).
-                    # If changed, append new content and update hash.
+                    # Framework computes the hash — plugins just return content
+                    content_hash = hashlib.sha256(content.encode()).hexdigest()
                     prev_hash = agent._plugin_system_prompt_hashes.get(
                         "system_prompt"
                     )
